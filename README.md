@@ -2,7 +2,7 @@
 
 A TUI for monitoring Antigravity account quotas written in Go using [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
-<!-- TODO: Add screenshot or GIF demonstrating the interface -->
+![Demo](demo.gif)
 
 ## Features
 
