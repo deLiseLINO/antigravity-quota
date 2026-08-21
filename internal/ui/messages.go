@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	"github.com/deLiseLINO/antigravity-quota/internal/api"
 	"github.com/deLiseLINO/antigravity-quota/internal/config"
 )
@@ -12,8 +14,27 @@ const (
 	ModeAll
 )
 
-type DataMsg api.AllModelsData
+type DataMsg struct {
+	Key     string
+	Data    api.AllModelsData
+	Summary api.QuotaSummaryData
+}
 
-type ErrMsg struct{ Err error }
+type ErrMsg struct {
+	Key string
+	Err error
+}
 
 type NewTokenMsg struct{ Token *config.TokenFile }
+
+type AnimationFrameMsg struct {
+	Now time.Time
+}
+
+type NoticeMsg struct {
+	Text string
+}
+
+type NoticeTimeoutMsg struct {
+	Seq int
+}

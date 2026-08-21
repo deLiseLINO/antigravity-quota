@@ -2,52 +2,29 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
-	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/deLiseLINO/antigravity-quota/internal/api"
 )
 
 func (m Model) View() string {
 	var s strings.Builder
+	modal := m.currentOverlayModal()
 
-	s.WriteString(TitleStyle.Render("🚀 Antigravity API Quota Monitor"))
+	s.WriteString(TitleStyle.Render("🚀 Antigravity Quota"))
 	s.WriteString("\n")
 
 	if len(m.Tokens) > 0 {
-		var tabs []string
-		for i, token := range m.Tokens {
-			email := token.Email
-			if email == "" {
-				email = "Unknown"
-			}
-			style := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-			if i == m.ActiveTokenIdx {
-				style = style.Foreground(lipgloss.Color("255")).Bold(true).Underline(true)
-			}
-			tabs = append(tabs, style.Render(email))
-		}
-		s.WriteString(strings.Join(tabs, " • "))
+		s.WriteString(m.renderAccountTabs())
 		s.WriteString("\n\n")
 	}
 
-	if m.DeleteConfirm {
-		s.WriteString(ErrorStyle.Render("Are you sure you want to delete this account? [x] Confirm [esc] Cancel"))
-		s.WriteString("\n\n")
-	}
-
-	if m.Loading {
-		s.WriteString("Loading...")
-		s.WriteString("\n")
-	} else if m.LoggingIn {
-		s.WriteString("Waiting for authentication in browser...")
-		s.WriteString("\n")
-	} else if m.Err != nil {
-		s.WriteString(ErrorStyle.Render(fmt.Sprintf("Error: %v", m.Err)))
-		s.WriteString("\n")
+	if m.Loading && len(m.Tokens) > 0 && !m.hasCachedDisplayData() {
+		s.WriteString(m.renderGroupsLoadingSkeleton())
 	} else {
 		switch m.Mode {
 		case ModeGroups:
@@ -57,43 +34,205 @@ func (m Model) View() string {
 		}
 	}
 
-	s.WriteString(HelpStyle.Render("\n[r] refresh • [tab/m] mode • [n] add account • [x] delete • [←/→] switch • [q] quit"))
+	footer := HelpStyle.Render("\n" + m.renderFooter())
+	s.WriteString(footer)
 
 	content := s.String()
-
-	contentWidth := lipgloss.Width(content)
-	contentHeight := lipgloss.Height(content)
-
 	containerStyle := lipgloss.NewStyle().Padding(1, 2)
+	hAlign := lipgloss.Left
+	vAlign := lipgloss.Top
+	if m.Width > 0 {
+		containerStyle = containerStyle.Width(m.Width)
+		hAlign = lipgloss.Center
+	}
+	if m.Height > 0 {
+		containerStyle = containerStyle.Height(m.Height)
+		vAlign = lipgloss.Center
+	}
+	containerStyle = containerStyle.Align(hAlign, vAlign)
 
-	if m.Width > contentWidth+4 && m.Height > contentHeight+2 {
-		containerStyle = containerStyle.
-			Width(m.Width).
-			Height(m.Height).
-			Align(lipgloss.Center, lipgloss.Center)
+	baseView := containerStyle.Render(content)
+
+	if modal != "" {
+		body, footerArea := splitFooterArea(baseView, lipgloss.Height(footer))
+		return joinFooterArea(overlayCenter(body, modal, m.Width, m.Height-lipgloss.Height(footer)), footerArea)
 	}
 
-	return containerStyle.Render(content)
+	return baseView
+}
+
+func (m Model) preferredContentWidth() int {
+	if m.Width <= 0 {
+		return 0
+	}
+	if m.Width <= 12 {
+		return m.Width
+	}
+	usable := m.Width - 4
+	const maxContentWidth = 220
+	if usable > maxContentWidth {
+		return maxContentWidth
+	}
+	return usable
+}
+
+func (m Model) renderFooter() string {
+	return "←→ Switch • r Refresh • tab Mode • n Add • x Delete • ? Help • q Quit"
+}
+
+func (m Model) activeTokenKey() string {
+	if m.ActiveTokenIdx < 0 || m.ActiveTokenIdx >= len(m.Tokens) {
+		return ""
+	}
+	return tokenKey(m.Tokens[m.ActiveTokenIdx])
+}
+
+func (m Model) hasCachedDisplayData() bool {
+	if m.ActiveTokenIdx < 0 || m.ActiveTokenIdx >= len(m.Tokens) {
+		return false
+	}
+	key := tokenKey(m.Tokens[m.ActiveTokenIdx])
+	if key == "" {
+		return false
+	}
+	if m.Mode == ModeGroups {
+		_, ok := m.SummaryCache[key]
+		return ok
+	}
+	_, ok := m.DataCache[key]
+	return ok
 }
 
 func (m Model) renderGroupsView() string {
 	var s strings.Builder
+	accountKey := m.activeTokenKey()
+	for _, group := range m.Summary.Groups {
+		s.WriteString(GroupHeaderStyle.Render(group.DisplayName))
+		s.WriteString("\n")
+		buckets := make([]api.QuotaBucket, 0, len(group.Buckets))
+		for _, bucket := range group.Buckets {
+			if bucket.Disabled {
+				continue
+			}
+			buckets = append(buckets, bucket)
+		}
+		sort.SliceStable(buckets, func(i, j int) bool {
+			return bucketOrder(buckets[i]) < bucketOrder(buckets[j])
+		})
+		for _, bucket := range buckets {
+			s.WriteString(m.renderBucketRow(bucket, accountKey))
+			s.WriteString("\n")
+		}
+	}
+	return s.String()
+}
 
-	s.WriteString(GroupHeaderStyle.Render("Claude"))
+func (m Model) renderGroupsLoadingSkeleton() string {
+	var s strings.Builder
+	s.WriteString(GroupHeaderStyle.Render("Loading..."))
 	s.WriteString("\n")
-	s.WriteString(m.renderModelRow(m.Data.Claude, m.claudeProgress))
-	s.WriteString("\n")
+	for range 3 {
+		s.WriteString(m.renderSkeletonRow())
+		s.WriteString("\n")
+	}
+	return s.String()
+}
 
-	s.WriteString(GroupHeaderStyle.Render("Gemini"))
-	s.WriteString("\n")
-	s.WriteString(m.renderModelRow(m.Data.Gemini, m.geminiProgress))
-	s.WriteString("\n")
+func bucketLabel(b api.QuotaBucket) string {
+	if isFiveHourBucket(b) {
+		return "5 hour"
+	}
+	if isWeeklyBucket(b) {
+		return "Weekly"
+	}
+	name := b.DisplayName
+	if name == "" {
+		name = b.Window
+	}
+	if name == "" {
+		name = b.BucketID
+	}
+	return name
+}
 
+func isFiveHourBucket(b api.QuotaBucket) bool {
+	haystack := strings.ToLower(b.BucketID + " " + b.Window + " " + b.DisplayName)
+	return strings.Contains(haystack, "5h") ||
+		strings.Contains(haystack, "5 h") ||
+		strings.Contains(haystack, "five hour")
+}
+
+func isWeeklyBucket(b api.QuotaBucket) bool {
+	haystack := strings.ToLower(b.BucketID + " " + b.Window + " " + b.DisplayName)
+	return strings.Contains(haystack, "week")
+}
+
+func bucketOrder(b api.QuotaBucket) int {
+	switch {
+	case isFiveHourBucket(b):
+		return 0
+	case isWeeklyBucket(b):
+		return 1
+	default:
+		return 2
+	}
+}
+
+func (m Model) renderBucketRow(b api.QuotaBucket, accountKey string) string {
+	var s strings.Builder
+
+	key := bucketAnimationKey(accountKey, b)
+	ratio := m.barRatio(key, clampRatio(b.RemainingFraction))
+
+	nameWidth, barWidth, percentWidth, resetWidth := m.rowLayout()
+	leadOffset := m.leadOffset()
+	name := truncateLabel(bucketLabel(b), nameWidth)
+	alignedName := padRight(name, nameWidth)
+	percentText := fmt.Sprintf("%.0f%%", b.RemainingFraction*100)
+	if ansi.StringWidth(percentText) > percentWidth {
+		percentText = truncateLabel(percentText, percentWidth)
+	}
+	resetText := truncateLabelFromLeft(formatResetText(b.ResetTime), resetWidth)
+	gradientStart, gradientEnd := barGradientForBucket(b)
+
+	s.WriteString(strings.Repeat(" ", leadOffset))
+	s.WriteString(windowRowIndent)
+	s.WriteString(LabelStyle.Render(alignedName))
+	s.WriteString(" ")
+	s.WriteString(renderSmoothBar(barWidth, ratio, gradientStart, gradientEnd))
+	s.WriteString(" ")
+	s.WriteString(PercentStyle.Copy().Width(percentWidth).Render(percentText))
+	if resetWidth > 0 && strings.TrimSpace(resetText) != "" {
+		s.WriteString(ResetTimeStyle.Copy().Width(resetWidth).Render(resetText))
+	}
+
+	return s.String()
+}
+
+func (m Model) renderSkeletonRow() string {
+	var s strings.Builder
+	nameWidth, barWidth, percentWidth, resetWidth := m.rowLayout()
+	leadOffset := m.leadOffset()
+	name := truncateLabel("Loading...", nameWidth)
+	alignedName := padRight(name, nameWidth)
+	status := truncateLabelStrict("Loading...", resetWidth)
+
+	s.WriteString(strings.Repeat(" ", leadOffset))
+	s.WriteString(windowRowIndent)
+	s.WriteString(LabelStyle.Render(alignedName))
+	s.WriteString(" ")
+	s.WriteString(renderSmoothBar(barWidth, 0, defaultBarGradientStart, defaultBarGradientEnd))
+	s.WriteString(" ")
+	s.WriteString(PercentStyle.Copy().Width(percentWidth).Render("..."))
+	if resetWidth > 0 && strings.TrimSpace(status) != "" {
+		s.WriteString(ResetTimeStyle.Copy().Width(resetWidth).Render(status))
+	}
 	return s.String()
 }
 
 func (m Model) renderAllView() string {
 	var s strings.Builder
+	accountKey := m.activeTokenKey()
 
 	s.WriteString(GroupHeaderStyle.Render(fmt.Sprintf("All Models (%d)", len(m.Data.All))))
 	s.WriteString("\n")
@@ -114,7 +253,7 @@ func (m Model) renderAllView() string {
 		s.WriteString(ClaudeSubheaderStyle.Render("  ▸ Claude"))
 		s.WriteString("\n")
 		for _, mq := range claudeModels {
-			s.WriteString(m.renderModelRow(mq, m.claudeProgress))
+			s.WriteString(m.renderModelRow(mq, accountKey))
 		}
 	}
 
@@ -123,7 +262,7 @@ func (m Model) renderAllView() string {
 		s.WriteString(GeminiSubheaderStyle.Render("  ▸ Gemini"))
 		s.WriteString("\n")
 		for _, mq := range geminiModels {
-			s.WriteString(m.renderModelRow(mq, m.geminiProgress))
+			s.WriteString(m.renderModelRow(mq, accountKey))
 		}
 	}
 
@@ -132,47 +271,163 @@ func (m Model) renderAllView() string {
 		s.WriteString(OtherSubheaderStyle.Render("  ▸ Other"))
 		s.WriteString("\n")
 		for _, mq := range otherModels {
-			s.WriteString(m.renderModelRow(mq, m.geminiProgress))
+			s.WriteString(m.renderModelRow(mq, accountKey))
 		}
 	}
 
 	return s.String()
 }
 
-func (m Model) renderModelRow(mq api.ModelQuota, prog progress.Model) string {
+func (m Model) renderModelRow(mq api.ModelQuota, accountKey string) string {
 	var s strings.Builder
 
-	percent := mq.Quota * 100
-	name := mq.Name
-	if len(name) > 33 {
-		name = name[:30] + "..."
+	key := modelAnimationKey(accountKey, mq)
+	ratio := m.barRatio(key, clampRatio(mq.Quota))
+
+	nameWidth, barWidth, percentWidth, resetWidth := m.rowLayout()
+	leadOffset := m.leadOffset()
+	name := truncateLabel(mq.Name, nameWidth)
+	alignedName := padRight(name, nameWidth)
+	percentText := fmt.Sprintf("%.0f%%", mq.Quota*100)
+	if ansi.StringWidth(percentText) > percentWidth {
+		percentText = truncateLabel(percentText, percentWidth)
 	}
+	resetText := truncateLabelFromLeft(formatResetText(mq.ResetTime), resetWidth)
+	gradientStart, gradientEnd := barGradientForModel(mq.Name)
 
-	alignedName := fmt.Sprintf("%-35s", name)
-
-	s.WriteString("    ")
+	s.WriteString(strings.Repeat(" ", leadOffset))
+	s.WriteString(windowRowIndent)
 	s.WriteString(LabelStyle.Render(alignedName))
 	s.WriteString(" ")
-	s.WriteString(prog.ViewAs(mq.Quota))
+	s.WriteString(renderSmoothBar(barWidth, ratio, gradientStart, gradientEnd))
 	s.WriteString(" ")
-	s.WriteString(PercentStyle.Render(fmt.Sprintf("%.1f%%", percent)))
-
-	if !mq.ResetTime.IsZero() {
-		remaining := time.Until(mq.ResetTime)
-		if remaining > 0 {
-			resetStr := ""
-			if remaining.Hours() >= 1 {
-				resetStr = fmt.Sprintf("reset in %.1fh", remaining.Hours())
-			} else {
-				resetStr = fmt.Sprintf("reset in %.0fm", remaining.Minutes())
-			}
-			s.WriteString(ResetTimeStyle.Render(resetStr))
-		}
-	} else {
-		s.WriteString(ResetTimeStyle.Render("reset in unknown"))
+	s.WriteString(PercentStyle.Copy().Width(percentWidth).Render(percentText))
+	if resetWidth > 0 && strings.TrimSpace(resetText) != "" {
+		s.WriteString(ResetTimeStyle.Copy().Width(resetWidth).Render(resetText))
 	}
 
-	s.WriteString("\n")
-
 	return s.String()
+}
+
+func (m Model) rowLayout() (nameWidth, barWidth, percentWidth, resetWidth int) {
+	nameWidth = 22
+	barWidth = m.barWidth
+	percentWidth = 5
+	resetWidth = 26
+
+	if m.Width <= 0 {
+		return
+	}
+
+	const (
+		minNameWidth      = 6
+		minNameSoftWidth  = 8
+		minBarWidth       = 8
+		minBarSoftWidth   = 10
+		minPercentWidth   = 4
+		minResetWidth     = 0
+		minResetSoftWidth = 8
+		gapsWidth         = 2
+		resetMarginLeft   = 2
+	)
+
+	available := m.preferredContentWidth() - ansi.StringWidth(windowRowIndent)
+	if available <= 0 {
+		return
+	}
+	switch contentWidth := m.preferredContentWidth(); {
+	case contentWidth <= 104 && available > 24:
+		available -= 8
+	case contentWidth <= 120 && available > 24:
+		available -= 4
+	}
+
+	used := nameWidth + barWidth + percentWidth + resetWidth + gapsWidth + resetMarginLeft
+	shortage := used - available
+	if shortage <= 0 {
+		return
+	}
+
+	reduce := func(current, minimum int) int {
+		if shortage <= 0 {
+			return current
+		}
+		canReduce := current - minimum
+		if canReduce <= 0 {
+			return current
+		}
+		if canReduce > shortage {
+			canReduce = shortage
+		}
+		shortage -= canReduce
+		return current - canReduce
+	}
+
+	reduceBalanced := func(left, leftMin, right, rightMin int) (int, int) {
+		for shortage > 0 {
+			progressed := false
+			if left > leftMin {
+				left--
+				shortage--
+				progressed = true
+			}
+			if shortage > 0 && right > rightMin {
+				right--
+				shortage--
+				progressed = true
+			}
+			if !progressed {
+				break
+			}
+		}
+		return left, right
+	}
+
+	nameWidth, resetWidth = reduceBalanced(nameWidth, minNameSoftWidth, resetWidth, minResetSoftWidth)
+	barWidth = reduce(barWidth, minBarSoftWidth)
+	percentWidth = reduce(percentWidth, minPercentWidth)
+	nameWidth, resetWidth = reduceBalanced(nameWidth, minNameWidth, resetWidth, minResetWidth)
+	barWidth = reduce(barWidth, minBarWidth)
+	return
+}
+
+func (m Model) rowDisplayWidth() int {
+	nameWidth, barWidth, percentWidth, resetWidth := m.rowLayout()
+	const (
+		gapsWidth       = 2
+		resetMarginLeft = 2
+	)
+	return ansi.StringWidth(windowRowIndent) + nameWidth + barWidth + percentWidth + resetWidth + gapsWidth + resetMarginLeft
+}
+
+func (m Model) leadOffset() int {
+	nameWidth, barWidth, _, _ := m.rowLayout()
+	rowWidth := m.rowDisplayWidth()
+	currentBarCenter := ansi.StringWidth(windowRowIndent) + nameWidth + 1 + (barWidth / 2)
+
+	offset := rowWidth - (2 * currentBarCenter)
+	offset += 4
+	if offset <= 0 {
+		return 0
+	}
+
+	maxOffset := m.preferredContentWidth() - rowWidth
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	return offset
+}
+
+func padRight(value string, width int) string {
+	if width <= 0 {
+		return value
+	}
+	current := ansi.StringWidth(value)
+	if current >= width {
+		return value
+	}
+	return value + strings.Repeat(" ", width-current)
 }
